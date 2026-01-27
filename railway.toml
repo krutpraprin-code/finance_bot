@@ -1,13 +1,5 @@
 [build]
 builder = "nixpacks"
-buildCommand = "pip install -r requirements.txt"
 
 [deploy]
 startCommand = "python src/bot.py"
-healthcheckPath = "/health"
-healthcheckTimeout = 30
-
-[variables]
-BOT_TOKEN = "required"
-LOG_LEVEL = "INFO"
-DEFAULT_CURRENCY = "RUB"
