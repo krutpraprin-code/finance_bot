@@ -1,26 +1,8 @@
 import os
 import logging
+from threading import Thread
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from dotenv import load_dotenv
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    CallbackQueryHandler,
-    ConversationHandler,
-    filters
-)
-
-from src.handlers.commands import (
-    start_command, help_command, stats_command,
-    settings_command, history_command
-)
-from src.handlers.expenses import (
-    start_add_transaction, category_selected,
-    amount_received, description_received, cancel,
-    SELECTING_CATEGORY, ENTERING_AMOUNT, ENTERING_DESCRIPTION
-)
-from src.handlers.statistics import handle_statistics_period, back_to_main
-from src.keyboards import get_main_keyboard
 
 # Загрузка переменных окружения
 load_dotenv()
@@ -32,108 +14,70 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Получение токена
-TOKEN = os.getenv('BOT_TOKEN')
+# Получаем токен
+TOKEN = os.environ.get('BOT_TOKEN')
 if not TOKEN:
-    logger.error("❌ BOT_TOKEN не найден в переменных окружения!")
-    logger.error("Установите переменную BOT_TOKEN в Railway или в файле .env")
+    logger.error("❌ Токен не найден!")
     exit(1)
 
+# Простой HTTP сервер для healthcheck
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == '/health':
+            self.send_response(200)
+            self.send_header('Content-type', 'text/plain')
+            self.end_headers()
+            self.wfile.write(b'OK')
+        else:
+            self.send_response(404)
+            self.end_headers()
+    
+    def log_message(self, format, *args):
+        # Отключаем логи запросов
+        pass
+
+def start_health_server():
+    """Запускает простой HTTP сервер для healthcheck"""
+    port = int(os.environ.get('PORT', 8080))
+    server = HTTPServer(('0.0.0.0', port), HealthHandler)
+    logger.info(f"🌐 Health server started on port {port}")
+    server.serve_forever()
+
 def main():
-    """Главная функция запуска бота"""
     logger.info("=" * 50)
     logger.info("🚀 ЗАПУСК ФИНАНСОВОГО БОТА")
     logger.info(f"Токен: {TOKEN[:10]}...")
     logger.info("=" * 50)
     
     try:
-        # Создаем приложение
+        # Импортируем здесь, чтобы видеть ошибки импорта
+        from telegram.ext import Application, CommandHandler
+        
+        # Запускаем health сервер в отдельном потоке
+        health_thread = Thread(target=start_health_server, daemon=True)
+        health_thread.start()
+        
+        # Простая команда для теста
+        async def start(update, context):
+            await update.message.reply_text("✅ Бот работает на Railway!")
+        
+        # Создаем приложение бота
         app = Application.builder().token(TOKEN).build()
+        app.add_handler(CommandHandler("start", start))
         
-        # ConversationHandler для добавления расходов
-        conv_expense = ConversationHandler(
-            entry_points=[
-                MessageHandler(filters.Regex('^➕ Добавить расход$'), 
-                             lambda u, c: start_add_transaction(u, c, 'expense'))
-            ],
-            states={
-                SELECTING_CATEGORY: [CallbackQueryHandler(category_selected)],
-                ENTERING_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, amount_received)],
-                ENTERING_DESCRIPTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, description_received)]
-            },
-            fallbacks=[CommandHandler('cancel', cancel)]
-        )
-        
-        # ConversationHandler для добавления доходов
-        conv_income = ConversationHandler(
-            entry_points=[
-                MessageHandler(filters.Regex('^💰 Добавить доход$'), 
-                             lambda u, c: start_add_transaction(u, c, 'income'))
-            ],
-            states={
-                SELECTING_CATEGORY: [CallbackQueryHandler(category_selected)],
-                ENTERING_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, amount_received)],
-                ENTERING_DESCRIPTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, description_received)]
-            },
-            fallbacks=[CommandHandler('cancel', cancel)]
-        )
-        
-        # Обработчики команд
-        app.add_handler(CommandHandler("start", start_command))
-        app.add_handler(CommandHandler("help", help_command))
-        app.add_handler(CommandHandler("stats", stats_command))
-        app.add_handler(CommandHandler("settings", settings_command))
-        app.add_handler(CommandHandler("history", history_command))
-        
-        # Добавляем ConversationHandlers
-        app.add_handler(conv_expense)
-        app.add_handler(conv_income)
-        
-        # Обработчики callback-запросов (статистика)
-        app.add_handler(CallbackQueryHandler(
-            lambda u, c: handle_statistics_period(u, c, 'today'),
-            pattern='^stats_today$'
-        ))
-        app.add_handler(CallbackQueryHandler(
-            lambda u, c: handle_statistics_period(u, c, 'week'),
-            pattern='^stats_week$'
-        ))
-        app.add_handler(CallbackQueryHandler(
-            lambda u, c: handle_statistics_period(u, c, 'month'),
-            pattern='^stats_month$'
-        ))
-        app.add_handler(CallbackQueryHandler(
-            lambda u, c: handle_statistics_period(u, c, 'year'),
-            pattern='^stats_year$'
-        ))
-        app.add_handler(CallbackQueryHandler(
-            lambda u, c: handle_statistics_period(u, c, 'all'),
-            pattern='^stats_all$'
-        ))
-        app.add_handler(CallbackQueryHandler(back_to_main, pattern='^back_to_main$'))
-        
-        # Обработчик текстовых сообщений (для главного меню)
-        app.add_handler(MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
-            lambda update, context: update.message.reply_text(
-                "Используйте кнопки меню 👇",
-                reply_markup=get_main_keyboard()
-            )
-        ))
-        
-        # Запуск бота
         logger.info("✅ Бот запущен и готов к работе!")
-        logger.info("📱 Найдите бота в Telegram и отправьте /start")
-        logger.info("=" * 50)
+        logger.info("📱 Откройте Telegram и отправьте /start")
         
-        app.run_polling(
-            drop_pending_updates=True,
-            allowed_updates=['message', 'callback_query']
-        )
+        # Запускаем бота
+        app.run_polling(drop_pending_updates=True)
         
+    except ImportError as e:
+        logger.error(f"❌ Ошибка импорта: {e}")
+        logger.error("Установите библиотеки: pip install python-telegram-bot")
     except Exception as e:
         logger.error(f"❌ Критическая ошибка: {e}")
-        raise
+        import traceback
+        logger.error(traceback.format_exc())
     finally:
         logger.info("🛑 Бот остановлен")
 
