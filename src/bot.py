@@ -1,11 +1,10 @@
 import os
+import sys
 import logging
-from threading import Thread
-from http.server import HTTPServer, BaseHTTPRequestHandler
 from dotenv import load_dotenv
 
-# Загрузка переменных окружения
-load_dotenv()
+# Добавляем src в путь Python
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 # Настройка логирования
 logging.basicConfig(
@@ -14,34 +13,42 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Получаем токен
-TOKEN = os.environ.get('BOT_TOKEN')
+# Загружаем переменные
+load_dotenv()
+TOKEN = os.getenv('BOT_TOKEN')
+
 if not TOKEN:
     logger.error("❌ Токен не найден!")
     exit(1)
 
-# Простой HTTP сервер для healthcheck
-class HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        if self.path == '/health':
-            self.send_response(200)
-            self.send_header('Content-type', 'text/plain')
-            self.end_headers()
-            self.wfile.write(b'OK')
-        else:
-            self.send_response(404)
-            self.end_headers()
+try:
+    from telegram.ext import (
+        Application,
+        CommandHandler,
+        MessageHandler,
+        CallbackQueryHandler,
+        ConversationHandler,
+        filters,
+        ContextTypes
+    )
     
-    def log_message(self, format, *args):
-        # Отключаем логи запросов
-        pass
-
-def start_health_server():
-    """Запускает простой HTTP сервер для healthcheck"""
-    port = int(os.environ.get('PORT', 8080))
-    server = HTTPServer(('0.0.0.0', port), HealthHandler)
-    logger.info(f"🌐 Health server started on port {port}")
-    server.serve_forever()
+    # Относительные импорты (без src!)
+    from handlers.commands import (
+        start_command, help_command, stats_command,
+        settings_command, history_command
+    )
+    from handlers.expenses import (
+        start_add_transaction, category_selected,
+        amount_received, description_received, cancel,
+        SELECTING_CATEGORY, ENTERING_AMOUNT, ENTERING_DESCRIPTION
+    )
+    from handlers.statistics import handle_statistics_period, back_to_main
+    
+    from keyboards import get_main_keyboard
+    
+except ImportError as e:
+    logger.error(f"❌ Ошибка импорта: {e}")
+    exit(1)
 
 def main():
     logger.info("=" * 50)
@@ -50,36 +57,44 @@ def main():
     logger.info("=" * 50)
     
     try:
-        # Импортируем здесь, чтобы видеть ошибки импорта
-        from telegram.ext import Application, CommandHandler
-        
-        # Запускаем health сервер в отдельном потоке
-        health_thread = Thread(target=start_health_server, daemon=True)
-        health_thread.start()
-        
-        # Простая команда для теста
-        async def start(update, context):
-            await update.message.reply_text("✅ Бот работает на Railway!")
-        
-        # Создаем приложение бота
         app = Application.builder().token(TOKEN).build()
-        app.add_handler(CommandHandler("start", start))
+        
+        # Команды
+        app.add_handler(CommandHandler("start", start_command))
+        app.add_handler(CommandHandler("help", help_command))
+        app.add_handler(CommandHandler("stats", stats_command))
+        app.add_handler(CommandHandler("history", history_command))
+        
+        # Conversation handlers
+        conv_expense = ConversationHandler(
+            entry_points=[
+                MessageHandler(filters.Regex('^➕ Добавить расход$'), 
+                             lambda u, c: start_add_transaction(u, c, 'expense'))
+            ],
+            states={
+                SELECTING_CATEGORY: [CallbackQueryHandler(category_selected)],
+                ENTERING_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, amount_received)],
+                ENTERING_DESCRIPTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, description_received)]
+            },
+            fallbacks=[CommandHandler('cancel', cancel)]
+        )
+        
+        app.add_handler(conv_expense)
+        
+        # Callback handlers
+        app.add_handler(CallbackQueryHandler(
+            lambda u, c: handle_statistics_period(u, c, 'today'),
+            pattern='^stats_today$'
+        ))
+        app.add_handler(CallbackQueryHandler(back_to_main, pattern='^back_to_main$'))
         
         logger.info("✅ Бот запущен и готов к работе!")
-        logger.info("📱 Откройте Telegram и отправьте /start")
-        
-        # Запускаем бота
         app.run_polling(drop_pending_updates=True)
         
-    except ImportError as e:
-        logger.error(f"❌ Ошибка импорта: {e}")
-        logger.error("Установите библиотеки: pip install python-telegram-bot")
     except Exception as e:
-        logger.error(f"❌ Критическая ошибка: {e}")
+        logger.error(f"❌ Ошибка: {e}")
         import traceback
         logger.error(traceback.format_exc())
-    finally:
-        logger.info("🛑 Бот остановлен")
 
 if __name__ == '__main__':
     main()
